@@ -1,0 +1,16 @@
+[default]
+master_key = "your_secret_master_key_here"
+length = 16
+lowercase = true
+uppercase = true
+digits = true
+symbols = true
+trigger_prefix = ";;"
+
+[sites.github]
+length = 20
+symbols = false
+
+[sites.bank]
+length = 24
+counter = 2
