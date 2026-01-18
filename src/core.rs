@@ -1,4 +1,5 @@
 use argon2::{Algorithm, Argon2, Params, Version};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroize;
 
@@ -14,6 +15,19 @@ const ARGON2_T_COST: u32 = 2;
 const ARGON2_P_COST: u32 = 1;
 const ENTROPY_BYTES: usize = 64;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GenerationMode {
+    Argon2id,
+    Concatenation,
+}
+
+impl Default for GenerationMode {
+    fn default() -> Self {
+        Self::Argon2id
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct PasswordConfig {
     pub length: usize,
@@ -21,6 +35,7 @@ pub struct PasswordConfig {
     pub use_uppercase: bool,
     pub use_digits: bool,
     pub use_symbols: bool,
+    pub mode: GenerationMode,
 }
 
 impl Default for PasswordConfig {
@@ -31,6 +46,7 @@ impl Default for PasswordConfig {
             use_uppercase: true,
             use_digits: true,
             use_symbols: true,
+            mode: GenerationMode::default(),
         }
     }
 }
@@ -72,6 +88,10 @@ pub fn generate_password(
     counter: u32,
     config: &PasswordConfig,
 ) -> Result<String> {
+    if config.mode == GenerationMode::Concatenation {
+        return Ok(format!("{}!{}", master_key, site));
+    }
+
     let charset = config.build_charset();
     if charset.is_empty() {
         return Err(EasyPasswordError::PasswordGeneration(
@@ -96,8 +116,13 @@ fn build_salt(site: &str, counter: u32) -> Vec<u8> {
 }
 
 fn derive_entropy(master_key: &str, salt: &[u8]) -> Result<Vec<u8>> {
-    let params = Params::new(ARGON2_M_COST, ARGON2_T_COST, ARGON2_P_COST, Some(ENTROPY_BYTES))
-        .map_err(|e| EasyPasswordError::PasswordGeneration(e.to_string()))?;
+    let params = Params::new(
+        ARGON2_M_COST,
+        ARGON2_T_COST,
+        ARGON2_P_COST,
+        Some(ENTROPY_BYTES),
+    )
+    .map_err(|e| EasyPasswordError::PasswordGeneration(e.to_string()))?;
 
     let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
     let mut entropy = vec![0u8; ENTROPY_BYTES];
@@ -214,5 +239,25 @@ mod tests {
         let pw1 = generate_password("master", "github.com", 1, &config).unwrap();
         let pw2 = generate_password("master", "github.com", 2, &config).unwrap();
         assert_ne!(pw1, pw2);
+    }
+
+    #[test]
+    fn test_concatenation_mode() {
+        let config = PasswordConfig {
+            mode: GenerationMode::Concatenation,
+            ..Default::default()
+        };
+        let pw = generate_password("master", "github.com", 1, &config).unwrap();
+        assert_eq!(pw, "master!github.com");
+    }
+
+    #[test]
+    fn test_concatenation_mode_preserves_case() {
+        let config = PasswordConfig {
+            mode: GenerationMode::Concatenation,
+            ..Default::default()
+        };
+        let pw = generate_password("master", "GitHub.com", 1, &config).unwrap();
+        assert_eq!(pw, "master!GitHub.com");
     }
 }

@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
-use crate::core::PasswordConfig;
+use crate::core::{GenerationMode, PasswordConfig};
 use crate::error::{EasyPasswordError, Result};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -29,6 +29,10 @@ pub struct DefaultConfig {
     pub symbols: bool,
     #[serde(default = "default_trigger_prefix")]
     pub trigger_prefix: String,
+    #[serde(default = "default_concat_trigger_prefix")]
+    pub concat_trigger_prefix: String,
+    #[serde(default)]
+    pub mode: GenerationMode,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -39,6 +43,7 @@ pub struct SiteConfig {
     pub digits: Option<bool>,
     pub symbols: Option<bool>,
     pub counter: Option<u32>,
+    pub mode: Option<GenerationMode>,
 }
 
 fn default_length() -> usize {
@@ -49,6 +54,9 @@ fn default_true() -> bool {
 }
 fn default_trigger_prefix() -> String {
     ";;".to_string()
+}
+fn default_concat_trigger_prefix() -> String {
+    "!!".to_string()
 }
 
 impl Default for DefaultConfig {
@@ -61,6 +69,8 @@ impl Default for DefaultConfig {
             digits: true,
             symbols: true,
             trigger_prefix: default_trigger_prefix(),
+            concat_trigger_prefix: default_concat_trigger_prefix(),
+            mode: GenerationMode::default(),
         }
     }
 }
@@ -70,8 +80,7 @@ impl Config {
         let path = Self::config_path()?;
         if path.exists() {
             let content = fs::read_to_string(&path)?;
-            let config: Config =
-                toml::from_str(&content).map_err(EasyPasswordError::TomlParse)?;
+            let config: Config = toml::from_str(&content).map_err(EasyPasswordError::TomlParse)?;
             Ok(config)
         } else {
             let config = Config::default();
@@ -117,6 +126,9 @@ impl Config {
             use_symbols: site_config
                 .and_then(|s| s.symbols)
                 .unwrap_or(self.default.symbols),
+            mode: site_config
+                .and_then(|s| s.mode)
+                .unwrap_or(self.default.mode),
         }
     }
 

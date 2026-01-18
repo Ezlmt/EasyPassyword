@@ -5,7 +5,10 @@ use std::sync::Arc;
 use clap::Parser;
 use crossbeam_channel::unbounded;
 
-use easypassword::{generate_password, start_keyboard_listener, Config, TextInjector, TriggerEvent};
+use easypassword::core::GenerationMode;
+use easypassword::{
+    generate_password, start_keyboard_listener, Config, TextInjector, TriggerEvent,
+};
 
 #[derive(Parser)]
 #[command(name = "easypassword")]
@@ -63,19 +66,37 @@ fn run(cli: Cli) -> anyhow::Result<()> {
     };
 
     println!("Trigger prefix: \"{}\"", config.default.trigger_prefix);
+    println!(
+        "Concat prefix: \"{}\"",
+        config.default.concat_trigger_prefix
+    );
     println!("\n--- Ready ---");
-    println!("Type: {}site.com<SPACE> to generate password", config.default.trigger_prefix);
+    println!(
+        "Type: {}site.com<SPACE> to generate password (Argon2id)",
+        config.default.trigger_prefix
+    );
+    println!(
+        "Type: {}site.com<SPACE> to generate password (Concatenation)",
+        config.default.concat_trigger_prefix
+    );
     println!("Example: {}github.com ", config.default.trigger_prefix);
     println!("\nPress Ctrl+C to exit\n");
 
     let injection_active = Arc::new(AtomicBool::new(false));
     let (tx, rx) = unbounded::<TriggerEvent>();
 
-    let _listener_handle = start_keyboard_listener(
-        tx,
-        config.default.trigger_prefix.clone(),
-        injection_active.clone(),
-    )?;
+    let triggers = vec![
+        (
+            config.default.trigger_prefix.clone(),
+            GenerationMode::Argon2id,
+        ),
+        (
+            config.default.concat_trigger_prefix.clone(),
+            GenerationMode::Concatenation,
+        ),
+    ];
+
+    let _listener_handle = start_keyboard_listener(tx, triggers, injection_active.clone())?;
 
     let mut injector = TextInjector::new(injection_active)?;
 
@@ -84,14 +105,27 @@ fn run(cli: Cli) -> anyhow::Result<()> {
     loop {
         match rx.recv() {
             Ok(trigger) => {
-                println!("[TRIGGER] Site: {}", trigger.site);
+                println!(
+                    "[TRIGGER] Site: {} | Mode: {:?}",
+                    trigger.site, trigger.mode
+                );
 
-                let password_config = config.get_password_config(&trigger.site);
+                let mut password_config = config.get_password_config(&trigger.site);
+
+                // Override mode based on trigger
+                if trigger.mode == GenerationMode::Concatenation {
+                    password_config.mode = GenerationMode::Concatenation;
+                }
+
                 let counter = config.get_counter(&trigger.site);
 
                 match generate_password(&master_key, &trigger.site, counter, &password_config) {
                     Ok(password) => {
-                        println!("[OK] Generated {} chars for {}", password.len(), trigger.site);
+                        println!(
+                            "[OK] Generated {} chars for {}",
+                            password.len(),
+                            trigger.site
+                        );
                         match injector.replace_trigger(trigger.trigger_len, &password) {
                             Ok(_) => println!("[OK] Password injected"),
                             Err(e) => println!("[ERROR] Injection failed: {}", e),
@@ -115,7 +149,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
 
 fn main() {
     let cli = Cli::parse();
-    
+
     if let Err(e) = run(cli) {
         println!("\n[FATAL] {}", e);
         wait_for_enter();

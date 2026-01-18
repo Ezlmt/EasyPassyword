@@ -4,35 +4,36 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
 
+use crate::core::GenerationMode;
 use crate::error::Result;
 
 #[derive(Debug, Clone)]
 pub struct TriggerEvent {
     pub site: String,
     pub trigger_len: usize,
+    pub mode: GenerationMode,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 enum DetectorState {
     Idle,
-    Prefix1,
-    Prefix2,
-    CollectingSite,
+    ScanningPrefix,
+    CollectingSite(GenerationMode, usize), // Mode and prefix length
 }
 
 pub struct TriggerDetector {
     state: DetectorState,
     buffer: String,
-    prefix: String,
+    triggers: Vec<(String, GenerationMode)>,
     injection_active: Arc<AtomicBool>,
 }
 
 impl TriggerDetector {
-    pub fn new(prefix: String, injection_active: Arc<AtomicBool>) -> Self {
+    pub fn new(triggers: Vec<(String, GenerationMode)>, injection_active: Arc<AtomicBool>) -> Self {
         Self {
             state: DetectorState::Idle,
             buffer: String::new(),
-            prefix,
+            triggers,
             injection_active,
         }
     }
@@ -91,47 +92,59 @@ impl TriggerDetector {
     }
 
     fn process_char(&mut self, ch: char) -> Option<TriggerEvent> {
-        let prefix_char_0 = self.prefix.chars().next().unwrap_or(';');
-        let prefix_char_1 = self.prefix.chars().nth(1).unwrap_or(';');
-
         match self.state {
             DetectorState::Idle => {
-                if ch == prefix_char_0 {
-                    self.state = DetectorState::Prefix1;
+                self.buffer.clear();
+                self.buffer.push(ch);
+                if self.check_prefixes() {
+                    self.state = DetectorState::ScanningPrefix;
+                    log::info!(
+                        "[STATE] Idle -> ScanningPrefix | buffer: \"{}\"",
+                        self.buffer
+                    );
+                } else {
+                    // Not a start of any prefix
                     self.buffer.clear();
-                    self.buffer.push(ch);
-                    log::info!("[STATE] Idle -> Prefix1 | buffer: \"{}\"", self.buffer);
                 }
                 None
             }
-            DetectorState::Prefix1 => {
+            DetectorState::ScanningPrefix => {
                 self.buffer.push(ch);
-                if ch == prefix_char_1 {
-                    self.state = DetectorState::Prefix2;
-                    log::info!("[STATE] Prefix1 -> Prefix2 | buffer: \"{}\"", self.buffer);
+
+                // Check if we matched a full prefix
+                if let Some((mode, len)) = self.check_full_match() {
+                    self.state = DetectorState::CollectingSite(mode, len);
+                    log::info!(
+                        "[STATE] ScanningPrefix -> CollectingSite({:?}) | buffer: \"{}\"",
+                        mode,
+                        self.buffer
+                    );
+                    return None;
+                }
+
+                // Check if we are still matching a prefix
+                if self.check_prefixes() {
+                    log::info!(
+                        "[STATE] ScanningPrefix continue | buffer: \"{}\"",
+                        self.buffer
+                    );
                 } else {
-                    log::info!("[STATE] Prefix1 -> Idle (wrong char: '{}') | resetting", ch);
+                    log::info!("[STATE] ScanningPrefix -> Idle (mismatch) | resetting");
                     self.reset();
+                    // Re-process char as start of new trigger?
+                    // For simplicity, just reset. User can retype.
                 }
                 None
             }
-            DetectorState::Prefix2 => {
-                self.buffer.push(ch);
-                if is_valid_site_char(ch) {
-                    self.state = DetectorState::CollectingSite;
-                    log::info!("[STATE] Prefix2 -> CollectingSite | buffer: \"{}\"", self.buffer);
-                } else {
-                    log::info!("[STATE] Prefix2 -> Idle (invalid char: '{}') | resetting", ch);
-                    self.reset();
-                }
-                None
-            }
-            DetectorState::CollectingSite => {
+            DetectorState::CollectingSite(mode, _) => {
                 if is_valid_site_char(ch) {
                     self.buffer.push(ch);
                     log::info!("[COLLECT] buffer: \"{}\"", self.buffer);
                 } else {
-                    log::info!("[STATE] CollectingSite -> Idle (invalid char: '{}') | resetting", ch);
+                    log::info!(
+                        "[STATE] CollectingSite -> Idle (invalid char: '{}') | resetting",
+                        ch
+                    );
                     self.reset();
                 }
                 None
@@ -139,18 +152,41 @@ impl TriggerDetector {
         }
     }
 
+    fn check_prefixes(&self) -> bool {
+        self.triggers
+            .iter()
+            .any(|(prefix, _)| prefix.starts_with(&self.buffer))
+    }
+
+    fn check_full_match(&self) -> Option<(GenerationMode, usize)> {
+        self.triggers.iter().find_map(|(prefix, mode)| {
+            if self.buffer == *prefix {
+                Some((*mode, prefix.len()))
+            } else {
+                None
+            }
+        })
+    }
+
     fn handle_terminator(&mut self) -> Option<TriggerEvent> {
-        if self.state == DetectorState::CollectingSite && self.buffer.len() > self.prefix.len() {
-            let site = self.buffer[self.prefix.len()..].to_string();
-            let trigger_len = self.buffer.chars().count() + 1;
-            log::info!(
-                "[TRIGGER] site: \"{}\" | trigger_len: {} | buffer was: \"{}\"",
-                site,
-                trigger_len,
-                self.buffer
-            );
-            self.reset();
-            return Some(TriggerEvent { site, trigger_len });
+        if let DetectorState::CollectingSite(mode, prefix_len) = self.state {
+            if self.buffer.len() > prefix_len {
+                let site = self.buffer[prefix_len..].to_string();
+                let trigger_len = self.buffer.chars().count() + 1;
+                log::info!(
+                    "[TRIGGER] site: \"{}\" | len: {} | mode: {:?} | buffer: \"{}\"",
+                    site,
+                    trigger_len,
+                    mode,
+                    self.buffer
+                );
+                self.reset();
+                return Some(TriggerEvent {
+                    site,
+                    trigger_len,
+                    mode,
+                });
+            }
         }
         log::info!(
             "[TERMINATOR] No trigger (state: {:?}, buffer: \"{}\")",
@@ -169,15 +205,116 @@ impl TriggerDetector {
     fn handle_backspace(&mut self) {
         if !self.buffer.is_empty() && self.state != DetectorState::Idle {
             self.buffer.pop();
-            if self.buffer.len() < self.prefix.len() {
+
+            // Re-evaluate state based on new buffer content
+            if self.buffer.is_empty() {
                 self.reset();
+                return;
+            }
+
+            // Check if we are still collecting site or moved back to prefix scanning
+            if let DetectorState::CollectingSite(_, prefix_len) = self.state {
+                if self.buffer.len() < prefix_len {
+                    // We backspaced into the prefix.
+                    // For simplicity, just reset to avoid complex state transitions backwards.
+                    // Or we could check if it matches a prefix prefix.
+                    // Let's reset to be safe and simple.
+                    self.reset();
+                }
+            } else if self.state == DetectorState::ScanningPrefix {
+                if !self.check_prefixes() {
+                    self.reset();
+                }
             }
         }
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rdev::EventType;
+
+    #[test]
+    fn test_multiple_prefixes() {
+        let triggers = vec![
+            (";;".to_string(), GenerationMode::Argon2id),
+            ("!!".to_string(), GenerationMode::Concatenation),
+        ];
+        let injection = Arc::new(AtomicBool::new(false));
+        let mut detector = TriggerDetector::new(triggers, injection);
+
+        let events = vec![
+            EventType::KeyPress(Key::SemiColon),
+            EventType::KeyPress(Key::SemiColon),
+            EventType::KeyPress(Key::KeyS),
+            EventType::KeyPress(Key::KeyI),
+            EventType::KeyPress(Key::KeyT),
+            EventType::KeyPress(Key::KeyE),
+            EventType::KeyPress(Key::Space),
+        ];
+
+        let mut found_trigger = None;
+        for evt_type in events {
+            let name = match evt_type {
+                EventType::KeyPress(Key::SemiColon) => Some(";".to_string()),
+                EventType::KeyPress(Key::KeyS) => Some("s".to_string()),
+                EventType::KeyPress(Key::KeyI) => Some("i".to_string()),
+                EventType::KeyPress(Key::KeyT) => Some("t".to_string()),
+                EventType::KeyPress(Key::KeyE) => Some("e".to_string()),
+                EventType::KeyPress(Key::Space) => Some(" ".to_string()),
+                _ => None,
+            };
+
+            let event = Event {
+                time: std::time::SystemTime::now(),
+                name,
+                event_type: evt_type,
+            };
+
+            if let Some(t) = detector.process_event(&event) {
+                found_trigger = Some(t);
+            }
+        }
+
+        let t = found_trigger.expect("Should have detected trigger");
+        assert_eq!(t.site, "site");
+        assert_eq!(t.mode, GenerationMode::Argon2id);
+
+        let events = vec![
+            EventType::KeyPress(Key::Num1),
+            EventType::KeyPress(Key::Num1),
+            EventType::KeyPress(Key::KeyA),
+            EventType::KeyPress(Key::Space),
+        ];
+
+        let mut found_trigger = None;
+        for evt_type in events {
+            let name = match evt_type {
+                EventType::KeyPress(Key::Num1) => Some("!".to_string()),
+                EventType::KeyPress(Key::KeyA) => Some("a".to_string()),
+                EventType::KeyPress(Key::Space) => Some(" ".to_string()),
+                _ => None,
+            };
+
+            let event = Event {
+                time: std::time::SystemTime::now(),
+                name,
+                event_type: evt_type,
+            };
+
+            if let Some(t) = detector.process_event(&event) {
+                found_trigger = Some(t);
+            }
+        }
+
+        let t = found_trigger.expect("Should have detected concat trigger");
+        assert_eq!(t.site, "a");
+        assert_eq!(t.mode, GenerationMode::Concatenation);
+    }
+}
 fn is_valid_site_char(ch: char) -> bool {
-    ch.is_ascii_alphanumeric() || ch == '.' || ch == '-' || ch == '_'
+    ch.is_ascii_alphanumeric() || ch == '.' || ch == '-' || ch == '_' || ch == '!' || ch == '@'
 }
 
 fn key_to_char(key: Key) -> Option<char> {
@@ -239,13 +376,16 @@ fn is_terminator(key: Key) -> bool {
 
 pub fn start_keyboard_listener(
     tx: Sender<TriggerEvent>,
-    prefix: String,
+    triggers: Vec<(String, GenerationMode)>,
     injection_active: Arc<AtomicBool>,
 ) -> Result<thread::JoinHandle<()>> {
     let handle = thread::spawn(move || {
-        let mut detector = TriggerDetector::new(prefix.clone(), injection_active);
+        let mut detector = TriggerDetector::new(triggers.clone(), injection_active);
 
-        log::info!("[LISTENER] Keyboard listener started, prefix: \"{}\"", prefix);
+        log::info!(
+            "[LISTENER] Keyboard listener started, triggers: {:?}",
+            triggers
+        );
 
         let callback = move |event: Event| {
             if let Some(trigger) = detector.process_event(&event) {

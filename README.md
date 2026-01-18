@@ -8,6 +8,7 @@ Type `;;github.com` anywhere → get a unique, reproducible password instantly.
 
 - **Deterministic**: Same inputs always produce the same password
 - **Global**: Works in any application (browsers, editors, terminals)
+- **Dual Modes**: Switch instantly between Secure (Argon2id) and Simple (Concatenation) modes via different prefixes
 - **Local-only**: No network access, no cloud sync, no data leaves your machine
 - **Secure**: Argon2id key derivation (OWASP 2025 recommended)
 - **Fast**: Instant password generation and injection
@@ -73,11 +74,12 @@ The trigger text will be replaced with your generated password.
 
 ### Examples
 
-| Input | Action |
-|-------|--------|
-| `;;github.com ` | Generate password for github.com |
-| `;;AWS-prod ` | Generate password for "aws-prod" |
-| `;;bank.example.com ` | Generate password for bank.example.com |
+| Input | Action | Mode |
+|-------|--------|------|
+| `;;github.com ` | Generate secure password for github.com | **Argon2id** |
+| `;;bank.example.com ` | Generate secure password for bank | **Argon2id** |
+| `!!github.com ` | Generate simple password (`master!github.com`) | **Concatenation** |
+| `!!local-dev ` | Generate simple password (`master!local-dev`) | **Concatenation** |
 
 > **Note**: Site names are case-insensitive (`GitHub.com` = `github.com`)
 
@@ -88,7 +90,8 @@ The trigger text will be replaced with your generated password.
 ```toml
 [default]
 master_key = "your-secret-master-key"
-trigger_prefix = ";;"
+trigger_prefix = ";;"        # Triggers Argon2id mode
+concat_trigger_prefix = "!!" # Triggers Concatenation mode
 length = 16
 lowercase = true
 uppercase = true
@@ -100,9 +103,9 @@ symbols = true
 length = 20
 symbols = false
 
-[sites.bank]
-length = 24
-counter = 2  # Increment to rotate password
+# You can also force a specific mode for a site regardless of trigger
+[sites.legacy-app]
+mode = "concatenation" 
 ```
 
 ### Options
@@ -110,8 +113,10 @@ counter = 2  # Increment to rotate password
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `master_key` | string | (required) | Your secret master key |
-| `trigger_prefix` | string | `;;` | Keyboard trigger prefix |
+| `trigger_prefix` | string | `;;` | Trigger for Argon2id mode |
+| `concat_trigger_prefix` | string | `!!` | Trigger for Concatenation mode |
 | `length` | integer | 16 | Generated password length |
+| `mode` | string | "argon2id" | Default generation mode |
 | `lowercase` | boolean | true | Include lowercase letters (a-z) |
 | `uppercase` | boolean | true | Include uppercase letters (A-Z) |
 | `digits` | boolean | true | Include digits (0-9) |
