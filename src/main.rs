@@ -1,14 +1,33 @@
-use std::io::{self, Write};
+#![cfg_attr(
+    all(target_os = "windows", not(debug_assertions)),
+    windows_subsystem = "windows"
+)]
+
+use std::fs;
+use std::fs::OpenOptions;
+use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::thread;
 
 use clap::Parser;
-use crossbeam_channel::unbounded;
+use crossbeam_channel::{select, unbounded, Receiver, Sender};
+
+use std::process::Command;
 
 use easypassword::core::GenerationMode;
 use easypassword::{
     generate_password, start_keyboard_listener, Config, TextInjector, TriggerEvent,
 };
+
+mod tray;
+
+#[derive(Debug, Clone)]
+pub enum ControlCommand {
+    ReloadConfig,
+    OpenConfig,
+    Exit,
+}
 
 #[derive(Parser)]
 #[command(name = "easypassword")]
@@ -19,71 +38,116 @@ struct Cli {
     verbose: bool,
 }
 
-fn wait_for_enter() {
-    println!("\nPress Enter to exit...");
-    let _ = io::stdout().flush();
-    let mut input = String::new();
-    let _ = io::stdin().read_line(&mut input);
+fn log_path() -> Option<PathBuf> {
+    let config_path = Config::config_path().ok()?;
+    let dir = config_path.parent()?;
+    Some(dir.join("easypassword.log"))
 }
 
-fn run(cli: Cli) -> anyhow::Result<()> {
-    if cli.verbose {
-        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+fn init_logging(verbose: bool) {
+    let mut builder = if verbose {
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
     } else {
-        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn"))
+    };
+
+    if let Some(path) = log_path() {
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+
+        if let Ok(file) = OpenOptions::new().create(true).append(true).open(&path) {
+            builder.target(env_logger::Target::Pipe(Box::new(file)));
+        }
     }
 
-    println!("=== EasyPassword ===\n");
+    builder.init();
+}
 
-    let config_path = Config::config_path()?;
-    println!("Config file: {:?}", config_path);
+fn handle_trigger(
+    config: &Config,
+    master_key: Option<&str>,
+    injector: &mut TextInjector,
+    trigger: TriggerEvent,
+) {
+    let mut password_config = config.get_password_config(&trigger.site);
 
-    let config = match Config::load() {
+    if trigger.mode == GenerationMode::Concatenation {
+        password_config.mode = GenerationMode::Concatenation;
+    }
+
+    let counter = config.get_counter(&trigger.site);
+
+    let Some(master_key) = master_key else {
+        log::error!(
+            "master_key not set; cannot generate password (site={})",
+            trigger.site
+        );
+        return;
+    };
+
+    match generate_password(master_key, &trigger.site, counter, &password_config) {
+        Ok(password) => {
+            if let Err(e) = injector.replace_trigger(trigger.trigger_len, &password) {
+                log::error!("injection failed (site={}): {}", trigger.site, e);
+            }
+        }
+        Err(e) => {
+            log::error!("generation failed (site={}): {}", trigger.site, e);
+        }
+    }
+}
+
+fn open_config_file() -> anyhow::Result<()> {
+    let path = Config::config_path()?;
+
+    #[cfg(target_os = "windows")]
+    {
+        Command::new("explorer")
+            .arg(path)
+            .spawn()
+            .map(|_| ())
+            .map_err(Into::into)
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open")
+            .arg(path)
+            .spawn()
+            .map(|_| ())
+            .map_err(Into::into)
+    }
+
+    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+    {
+        Err(anyhow::anyhow!(
+            "Open config is not supported on this platform"
+        ))
+    }
+}
+
+fn worker_loop(
+    trigger_tx: Sender<TriggerEvent>,
+    trigger_rx: Receiver<TriggerEvent>,
+    command_rx: Receiver<ControlCommand>,
+) {
+    let mut config = match Config::load() {
         Ok(c) => c,
         Err(e) => {
-            println!("\nERROR: Failed to load config: {}", e);
-            println!("\nPlease create config file at: {:?}", config_path);
-            println!("\nExample config.toml:");
-            println!("  [default]");
-            println!("  master_key = \"your_secret_key\"");
-            println!("  trigger_prefix = \";;\"");
-            return Err(e.into());
+            log::error!("failed to load config: {}", e);
+            Config::default()
         }
     };
 
-    let master_key = match &config.default.master_key {
-        Some(key) if !key.is_empty() => {
-            println!("Master key: [loaded from config]");
-            key.clone()
-        }
-        _ => {
-            println!("\nERROR: master_key not set in config!");
-            println!("\nPlease add to {:?}:", config_path);
-            println!("\n  [default]");
-            println!("  master_key = \"your_secret_key_here\"");
-            return Err(anyhow::anyhow!("master_key not configured"));
-        }
-    };
-
-    println!("Trigger prefix: \"{}\"", config.default.trigger_prefix);
-    println!(
-        "Concat prefix: \"{}\"",
-        config.default.concat_trigger_prefix
-    );
-    println!("\n--- Ready ---");
-    println!(
-        "Type: {}site.com<SPACE> to generate password (Argon2id)",
-        config.default.trigger_prefix
-    );
-    println!(
-        "Type: {}site.com<SPACE> to generate password (Concatenation)",
-        config.default.concat_trigger_prefix
-    );
-    println!("Example: {}github.com ", config.default.trigger_prefix);
-    println!("\nPress Ctrl+C to exit\n");
+    let mut master_key = config
+        .default
+        .master_key
+        .as_deref()
+        .filter(|k| !k.is_empty())
+        .map(str::to_string);
 
     let injection_active = Arc::new(AtomicBool::new(false));
-    let (tx, rx) = unbounded::<TriggerEvent>();
 
     let triggers = vec![
         (
@@ -96,63 +160,87 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         ),
     ];
 
-    let _listener_handle = start_keyboard_listener(tx, triggers, injection_active.clone())?;
+    if let Err(e) = start_keyboard_listener(trigger_tx, triggers, injection_active.clone()) {
+        log::error!("failed to start keyboard listener: {}", e);
+        return;
+    }
 
-    let mut injector = TextInjector::new(injection_active)?;
-
-    println!("Listening for keyboard input...\n");
+    let mut injector = match TextInjector::new(injection_active) {
+        Ok(i) => i,
+        Err(e) => {
+            log::error!("failed to initialize injector: {}", e);
+            return;
+        }
+    };
 
     loop {
-        match rx.recv() {
-            Ok(trigger) => {
-                println!(
-                    "[TRIGGER] Site: {} | Mode: {:?}",
-                    trigger.site, trigger.mode
-                );
-
-                let mut password_config = config.get_password_config(&trigger.site);
-
-                // Override mode based on trigger
-                if trigger.mode == GenerationMode::Concatenation {
-                    password_config.mode = GenerationMode::Concatenation;
-                }
-
-                let counter = config.get_counter(&trigger.site);
-
-                match generate_password(&master_key, &trigger.site, counter, &password_config) {
-                    Ok(password) => {
-                        println!(
-                            "[OK] Generated {} chars for {}",
-                            password.len(),
-                            trigger.site
-                        );
-                        match injector.replace_trigger(trigger.trigger_len, &password) {
-                            Ok(_) => println!("[OK] Password injected"),
-                            Err(e) => println!("[ERROR] Injection failed: {}", e),
-                        }
+        select! {
+            recv(trigger_rx) -> msg => {
+                match msg {
+                    Ok(trigger) => {
+                        handle_trigger(&config, master_key.as_deref(), &mut injector, trigger);
                     }
                     Err(e) => {
-                        println!("[ERROR] Generation failed: {}", e);
+                        log::error!("trigger channel closed: {}", e);
+                        break;
                     }
                 }
-                println!();
             }
-            Err(e) => {
-                println!("[ERROR] Channel error: {}", e);
-                break;
+            recv(command_rx) -> msg => {
+                match msg {
+                    Ok(ControlCommand::ReloadConfig) => {
+                        match Config::load() {
+                            Ok(c) => {
+                                config = c;
+                                master_key = config
+                                    .default
+                                    .master_key
+                                    .as_deref()
+                                    .filter(|k| !k.is_empty())
+                                    .map(str::to_string);
+                                log::info!("config reloaded");
+                            }
+                            Err(e) => {
+                                log::error!("failed to reload config: {}", e);
+                            }
+                        }
+                    }
+                    Ok(ControlCommand::OpenConfig) => {
+                        if let Err(e) = open_config_file() {
+                            log::error!("failed to open config file: {}", e);
+                        }
+                    }
+                    Ok(ControlCommand::Exit) => {
+                        log::info!("exit requested");
+                        std::process::exit(0);
+                    }
+                    Err(e) => {
+                        log::error!("command channel closed: {}", e);
+                        break;
+                    }
+                }
             }
         }
     }
+}
 
-    Ok(())
+fn run(cli: Cli) -> anyhow::Result<()> {
+    init_logging(cli.verbose);
+
+    let (trigger_tx, trigger_rx) = unbounded::<TriggerEvent>();
+    let (command_tx, command_rx) = unbounded::<ControlCommand>();
+
+    let worker_trigger_tx = trigger_tx.clone();
+    let _worker = thread::spawn(move || worker_loop(worker_trigger_tx, trigger_rx, command_rx));
+
+    tray::run_tray(command_tx)
 }
 
 fn main() {
     let cli = Cli::parse();
 
     if let Err(e) = run(cli) {
-        println!("\n[FATAL] {}", e);
-        wait_for_enter();
+        log::error!("fatal error: {}", e);
         std::process::exit(1);
     }
 }

@@ -136,7 +136,7 @@ impl TriggerDetector {
                 }
                 None
             }
-            DetectorState::CollectingSite(mode, _) => {
+            DetectorState::CollectingSite(_mode, _) => {
                 if is_valid_site_char(ch) {
                     self.buffer.push(ch);
                     log::info!("[COLLECT] buffer: \"{}\"", self.buffer);
@@ -221,10 +221,8 @@ impl TriggerDetector {
                     // Let's reset to be safe and simple.
                     self.reset();
                 }
-            } else if self.state == DetectorState::ScanningPrefix {
-                if !self.check_prefixes() {
-                    self.reset();
-                }
+            } else if self.state == DetectorState::ScanningPrefix && !self.check_prefixes() {
+                self.reset();
             }
         }
     }
