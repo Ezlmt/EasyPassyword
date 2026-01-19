@@ -1,6 +1,6 @@
 # EasyPassword
 
-A local-only, deterministic password generator with global keyboard trigger detection.
+EasyPassword is a cross-platform, local-only, deterministic password generator that securely derives and injects site-specific passwords using Argon2id via global keyboard triggers.
 
 Type `;;github.com` anywhere → get a unique, reproducible password instantly.
 
