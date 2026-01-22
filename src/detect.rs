@@ -1,11 +1,18 @@
 use crossbeam_channel::Sender;
-use rdev::{listen, Event, EventType, Key};
+#[cfg(not(target_os = "macos"))]
+use rdev::listen;
+use rdev::{Event, EventType, Key};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+#[cfg(not(target_os = "macos"))]
 use std::thread;
 
 use crate::core::GenerationMode;
 use crate::error::Result;
+
+#[cfg(target_os = "macos")]
+#[path = "detect_macos.rs"]
+mod detect_macos;
 
 #[derive(Debug, Clone)]
 pub struct TriggerEvent {
@@ -21,7 +28,7 @@ enum DetectorState {
     CollectingSite(GenerationMode, usize), // Mode and prefix length
 }
 
-pub struct TriggerDetector {
+pub(crate) struct TriggerDetector {
     state: DetectorState,
     buffer: String,
     triggers: Vec<(String, GenerationMode)>,
@@ -372,6 +379,16 @@ fn is_terminator(key: Key) -> bool {
     matches!(key, Key::Space | Key::Return | Key::Tab)
 }
 
+#[cfg(target_os = "macos")]
+pub fn start_keyboard_listener(
+    tx: Sender<TriggerEvent>,
+    triggers: Vec<(String, GenerationMode)>,
+    injection_active: Arc<AtomicBool>,
+) -> Result<std::thread::JoinHandle<()>> {
+    detect_macos::start_keyboard_listener_macos(tx, triggers, injection_active)
+}
+
+#[cfg(not(target_os = "macos"))]
 pub fn start_keyboard_listener(
     tx: Sender<TriggerEvent>,
     triggers: Vec<(String, GenerationMode)>,
