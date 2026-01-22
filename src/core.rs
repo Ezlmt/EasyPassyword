@@ -89,7 +89,9 @@ pub fn generate_password(
     config: &PasswordConfig,
 ) -> Result<String> {
     if config.mode == GenerationMode::Concatenation {
-        return Ok(format!("{}!{}", master_key, site));
+        // Concatenation mode is intentionally simple: no implicit separator.
+        // If you want a separator (e.g. '!'), include it in the master_key.
+        return Ok(format!("{}{}", master_key, site));
     }
 
     let charset = config.build_charset();
@@ -248,7 +250,7 @@ mod tests {
             ..Default::default()
         };
         let pw = generate_password("master", "github.com", 1, &config).unwrap();
-        assert_eq!(pw, "master!github.com");
+        assert_eq!(pw, "mastergithub.com");
     }
 
     #[test]
@@ -258,6 +260,16 @@ mod tests {
             ..Default::default()
         };
         let pw = generate_password("master", "GitHub.com", 1, &config).unwrap();
-        assert_eq!(pw, "master!GitHub.com");
+        assert_eq!(pw, "masterGitHub.com");
+    }
+
+    #[test]
+    fn test_concatenation_mode_allows_separator_in_master_key() {
+        let config = PasswordConfig {
+            mode: GenerationMode::Concatenation,
+            ..Default::default()
+        };
+        let pw = generate_password("master!", "github.com", 1, &config).unwrap();
+        assert_eq!(pw, "master!github.com");
     }
 }

@@ -79,8 +79,10 @@ The trigger text will be replaced with your generated password.
 |-------|--------|------|
 | `;;github.com ` | Generate secure password for github.com | **Argon2id** |
 | `;;bank.example.com ` | Generate secure password for bank | **Argon2id** |
-| `!!github.com ` | Generate simple password (`master!github.com`) | **Concatenation** |
-| `!!local-dev ` | Generate simple password (`master!local-dev`) | **Concatenation** |
+| `!!github.com ` | Generate simple password (`mastergithub.com`) | **Concatenation** |
+| `!!local-dev ` | Generate simple password (`masterlocal-dev`) | **Concatenation** |
+
+> **Note**: Concatenation mode does not add an implicit separator. If you want one (e.g. `master!github.com`), include it in your `master_key` (e.g. `master_key = "master!"`).
 
 > **Note**: Site names are case-insensitive (`GitHub.com` = `github.com`)
 
