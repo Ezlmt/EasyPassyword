@@ -12,7 +12,8 @@ Type `;;github.com` anywhere → get a unique, reproducible password instantly.
 - **Local-only**: No network access, no cloud sync, no data leaves your machine
 - **Secure**: Argon2id key derivation (OWASP 2025 recommended)
 - **Fast**: Instant password generation and injection
-- **Cross-platform**: Windows and macOS support
+- **Cross-platform**: Windows, macOS, and Linux support
+- **Start on Login**: Automatically launch the app when you log in (configurable via tray menu or config)
 
 ## Installation
 
@@ -97,6 +98,7 @@ lowercase = true
 uppercase = true
 digits = true
 symbols = true
+autostart = false            # Start on system login
 
 # Per-site overrides
 [sites.github]
@@ -122,6 +124,7 @@ mode = "concatenation"
 | `digits` | boolean | true | Include digits (0-9) |
 | `symbols` | boolean | true | Include symbols (!@#$%...) |
 | `counter` | integer | 1 | Password version (increment to rotate) |
+| `autostart` | boolean | false | Automatically start on system login |
 
 ## How It Works
 
@@ -152,19 +155,18 @@ Following OWASP 2025 recommendations:
 
 ## Platform Notes
 
-### Windows
+The app includes a **Start on Login** feature that can be toggled via the system tray menu or the `autostart` config option.
 
-- No special permissions required
-- Run as normal user
+### Windows
+- **Start on Login**: Implemented via Registry `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` (value: `EasyPassword`).
+- No special permissions required.
 
 ### macOS
+- **Accessibility**: Requires permission to monitor keyboard and inject text (System Preferences → Security & Privacy → Privacy → Accessibility).
+- **Start on Login**: Implemented via LaunchAgent (`~/Library/LaunchAgents/com.easypassword.EasyPassword.plist`).
 
-Requires Accessibility permission:
-
-1. System Preferences → Security & Privacy → Privacy
-2. Select "Accessibility"
-3. Add `easypassword` to the list
-4. Restart the application
+### Linux
+- **Start on Login**: Implemented via XDG Autostart (`~/.config/autostart/easypassword.desktop`).
 
 ## Troubleshooting
 
@@ -183,6 +185,9 @@ Check error message. Most common cause: `master_key` not set in config.
 1. Some applications block simulated input
 2. Try a different application (Notepad, browser URL bar)
 3. Check console for injection errors
+
+### Start on login not working
+On macOS and Linux, the autostart configuration may require a logout and re-login to take effect for the first time.
 
 ## CLI Options
 

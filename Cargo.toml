@@ -1,6 +1,6 @@
 [package]
 name = "easypassword"
-version = "0.1.0"
+version = "0.1.2"
 edition = "2021"
 description = "A local-only deterministic password generator with global keyboard trigger detection"
 license = "MIT"
@@ -32,6 +32,9 @@ rgb = "0.8"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-core-foundation = "0.3"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+winreg = "0.52"
 
 [profile.release]
 opt-level = 3

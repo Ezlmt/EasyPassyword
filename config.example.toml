@@ -1,5 +1,6 @@
 [default]
 master_key = "your_secret_master_key_here"
+autostart = false
 length = 16
 lowercase = true
 uppercase = true

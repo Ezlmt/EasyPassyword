@@ -1,11 +1,11 @@
-use crossbeam_channel::Sender;
+use crossbeam_channel::{Receiver, Sender};
 use tao::event::{Event, StartCause};
 use tao::event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy};
 
-use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
+use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{TrayIconBuilder, TrayIconEvent};
 
-use crate::ControlCommand;
+use crate::{ControlCommand, TrayUpdate};
 
 fn set_control_flow(control_flow: &mut ControlFlow) {
     *control_flow = ControlFlow::Wait;
@@ -33,7 +33,11 @@ fn forward_menu_event(
     }
 }
 
-pub fn run_tray(command_tx: Sender<ControlCommand>) -> ! {
+pub fn run_tray(
+    command_tx: Sender<ControlCommand>,
+    tray_update_rx: Receiver<TrayUpdate>,
+    initial_autostart: bool,
+) -> ! {
     let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
 
     let proxy = event_loop.create_proxy();
@@ -42,6 +46,7 @@ pub fn run_tray(command_tx: Sender<ControlCommand>) -> ! {
 
     let open_config = MenuItem::new("Open Config", true, None);
     let reload_config = MenuItem::new("Reload Config", true, None);
+    let start_on_login = CheckMenuItem::new("Start on Login", true, initial_autostart, None);
     let quit = MenuItem::new("Exit", true, None);
 
     let tray_menu = Menu::new();
@@ -49,12 +54,15 @@ pub fn run_tray(command_tx: Sender<ControlCommand>) -> ! {
         .append_items(&[
             &open_config,
             &reload_config,
+            &start_on_login,
             &PredefinedMenuItem::separator(),
             &quit,
         ])
         .expect("failed to build tray menu");
 
     let mut tray_icon = None;
+    let mut autostart_enabled = initial_autostart;
+    let mut autostart_revert_to: Option<bool> = None;
 
     event_loop.run(move |event, _, control_flow| {
         set_control_flow(control_flow);
@@ -83,6 +91,12 @@ pub fn run_tray(command_tx: Sender<ControlCommand>) -> ! {
                     let _ = command_tx.send(ControlCommand::OpenConfig);
                 } else if event.id == reload_config.id() {
                     let _ = command_tx.send(ControlCommand::ReloadConfig);
+                } else if event.id == start_on_login.id() {
+                    let requested = !autostart_enabled;
+                    autostart_revert_to = Some(autostart_enabled);
+                    autostart_enabled = requested;
+                    start_on_login.set_checked(requested);
+                    let _ = command_tx.send(ControlCommand::SetAutostart(requested));
                 } else if event.id == quit.id() {
                     let _ = command_tx.send(ControlCommand::Exit);
                     tray_icon.take();
@@ -90,6 +104,27 @@ pub fn run_tray(command_tx: Sender<ControlCommand>) -> ! {
                 }
             }
             Event::UserEvent(UserEvent::TrayIconEvent(_event)) => {}
+            Event::MainEventsCleared => {
+                while let Ok(update) = tray_update_rx.try_recv() {
+                    match update {
+                        TrayUpdate::AutostartSetResult { enabled, ok, error } => {
+                            if ok {
+                                autostart_revert_to = None;
+                                autostart_enabled = enabled;
+                                start_on_login.set_checked(enabled);
+                            } else {
+                                let fallback = autostart_revert_to.unwrap_or(enabled);
+                                autostart_revert_to = None;
+                                autostart_enabled = fallback;
+                                start_on_login.set_checked(fallback);
+                                if let Some(error) = error {
+                                    log::error!("failed to set autostart: {}", error);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             _ => {}
         }
     });

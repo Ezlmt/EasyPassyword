@@ -20,13 +20,24 @@ use easypassword::{
     generate_password, start_keyboard_listener, Config, TextInjector, TriggerEvent,
 };
 
+mod autostart;
 mod tray;
 
 #[derive(Debug, Clone)]
 pub enum ControlCommand {
     ReloadConfig,
     OpenConfig,
+    SetAutostart(bool),
     Exit,
+}
+
+#[derive(Debug, Clone)]
+pub enum TrayUpdate {
+    AutostartSetResult {
+        enabled: bool,
+        ok: bool,
+        error: Option<String>,
+    },
 }
 
 #[derive(Parser)]
@@ -131,6 +142,7 @@ fn worker_loop(
     trigger_tx: Sender<TriggerEvent>,
     trigger_rx: Receiver<TriggerEvent>,
     command_rx: Receiver<ControlCommand>,
+    tray_update_tx: Sender<TrayUpdate>,
 ) {
     let mut config = match Config::load() {
         Ok(c) => c,
@@ -139,6 +151,10 @@ fn worker_loop(
             Config::default()
         }
     };
+
+    if let Err(e) = autostart::set_enabled(config.default.autostart) {
+        log::error!("failed to apply autostart setting: {}", e);
+    }
 
     let mut master_key = config
         .default
@@ -189,6 +205,7 @@ fn worker_loop(
             recv(command_rx) -> msg => {
                 match msg {
                     Ok(ControlCommand::ReloadConfig) => {
+                        let previous_autostart = config.default.autostart;
                         match Config::load() {
                             Ok(c) => {
                                 config = c;
@@ -198,6 +215,29 @@ fn worker_loop(
                                     .as_deref()
                                     .filter(|k| !k.is_empty())
                                     .map(str::to_string);
+
+                                let requested_autostart = config.default.autostart;
+                                match autostart::set_enabled(requested_autostart) {
+                                    Ok(()) => {
+                                        let _ = tray_update_tx.send(TrayUpdate::AutostartSetResult {
+                                            enabled: requested_autostart,
+                                            ok: true,
+                                            error: None,
+                                        });
+                                    }
+                                    Err(e) => {
+                                        config.default.autostart = previous_autostart;
+                                        let _ = tray_update_tx.send(TrayUpdate::AutostartSetResult {
+                                            enabled: previous_autostart,
+                                            ok: false,
+                                            error: Some(e.to_string()),
+                                        });
+                                        log::error!(
+                                            "failed to apply autostart setting on reload: {}",
+                                            e
+                                        );
+                                    }
+                                }
                                 log::info!("config reloaded");
                             }
                             Err(e) => {
@@ -208,6 +248,36 @@ fn worker_loop(
                     Ok(ControlCommand::OpenConfig) => {
                         if let Err(e) = open_config_file() {
                             log::error!("failed to open config file: {}", e);
+                        }
+                    }
+                    Ok(ControlCommand::SetAutostart(enabled)) => {
+                        let previous = config.default.autostart;
+
+                        let result = (|| -> anyhow::Result<()> {
+                            autostart::set_enabled(enabled)?;
+                            config.default.autostart = enabled;
+                            config.save()?;
+                            Ok(())
+                        })();
+
+                        match result {
+                            Ok(()) => {
+                                let _ = tray_update_tx.send(TrayUpdate::AutostartSetResult {
+                                    enabled,
+                                    ok: true,
+                                    error: None,
+                                });
+                                log::info!("autostart set to {}", enabled);
+                            }
+                            Err(e) => {
+                                config.default.autostart = previous;
+                                let _ = tray_update_tx.send(TrayUpdate::AutostartSetResult {
+                                    enabled: previous,
+                                    ok: false,
+                                    error: Some(e.to_string()),
+                                });
+                                log::error!("failed to set autostart: {}", e);
+                            }
                         }
                     }
                     Ok(ControlCommand::Exit) => {
@@ -229,11 +299,16 @@ fn run(cli: Cli) -> anyhow::Result<()> {
 
     let (trigger_tx, trigger_rx) = unbounded::<TriggerEvent>();
     let (command_tx, command_rx) = unbounded::<ControlCommand>();
+    let (tray_update_tx, tray_update_rx) = unbounded::<TrayUpdate>();
+
+    let initial_autostart = Config::load().map(|c| c.default.autostart).unwrap_or(false);
 
     let worker_trigger_tx = trigger_tx.clone();
-    let _worker = thread::spawn(move || worker_loop(worker_trigger_tx, trigger_rx, command_rx));
+    let _worker = thread::spawn(move || {
+        worker_loop(worker_trigger_tx, trigger_rx, command_rx, tray_update_tx)
+    });
 
-    tray::run_tray(command_tx)
+    tray::run_tray(command_tx, tray_update_rx, initial_autostart)
 }
 
 fn main() {

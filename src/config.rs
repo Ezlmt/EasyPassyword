@@ -17,6 +17,8 @@ pub struct Config {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DefaultConfig {
     pub master_key: Option<String>,
+    #[serde(default)]
+    pub autostart: bool,
     #[serde(default = "default_length")]
     pub length: usize,
     #[serde(default = "default_true")]
@@ -63,6 +65,7 @@ impl Default for DefaultConfig {
     fn default() -> Self {
         Self {
             master_key: None,
+            autostart: false,
             length: default_length(),
             lowercase: true,
             uppercase: true,
