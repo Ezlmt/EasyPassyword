@@ -1,18 +1,13 @@
 use crossbeam_channel::Sender;
-#[cfg(not(target_os = "macos"))]
-use rdev::listen;
-use rdev::{Event, EventType, Key};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-#[cfg(not(target_os = "macos"))]
-use std::thread;
+
+use rdev::{Event, EventType, Key};
 
 use crate::core::GenerationMode;
 use crate::error::Result;
 
-#[cfg(target_os = "macos")]
-#[path = "detect_macos.rs"]
-mod detect_macos;
+mod platform;
 
 #[derive(Debug, Clone)]
 pub struct TriggerEvent {
@@ -53,7 +48,7 @@ impl TriggerDetector {
 
         match &event.event_type {
             EventType::KeyPress(key) => {
-                log::info!(
+                log::debug!(
                     "[KEY] Press: {:?} | name: {:?} | state: {:?} | buffer: \"{}\"",
                     key,
                     event.name,
@@ -73,12 +68,12 @@ impl TriggerDetector {
     fn handle_key_press(&mut self, key: Key, event: &Event) -> Option<TriggerEvent> {
         if key == Key::Backspace {
             self.handle_backspace();
-            log::info!("[BACKSPACE] buffer now: \"{}\"", self.buffer);
+            log::debug!("[BACKSPACE] buffer now: \"{}\"", self.buffer);
             return None;
         }
 
         if is_terminator(key) {
-            log::info!("[TERMINATOR] {:?} pressed, checking trigger...", key);
+            log::debug!("[TERMINATOR] {:?} pressed, checking trigger...", key);
             return self.handle_terminator();
         }
 
@@ -105,7 +100,7 @@ impl TriggerDetector {
                 self.buffer.push(ch);
                 if self.check_prefixes() {
                     self.state = DetectorState::ScanningPrefix;
-                    log::info!(
+                    log::debug!(
                         "[STATE] Idle -> ScanningPrefix | buffer: \"{}\"",
                         self.buffer
                     );
@@ -121,7 +116,7 @@ impl TriggerDetector {
                 // Check if we matched a full prefix
                 if let Some((mode, len)) = self.check_full_match() {
                     self.state = DetectorState::CollectingSite(mode, len);
-                    log::info!(
+                    log::debug!(
                         "[STATE] ScanningPrefix -> CollectingSite({:?}) | buffer: \"{}\"",
                         mode,
                         self.buffer
@@ -131,24 +126,22 @@ impl TriggerDetector {
 
                 // Check if we are still matching a prefix
                 if self.check_prefixes() {
-                    log::info!(
+                    log::debug!(
                         "[STATE] ScanningPrefix continue | buffer: \"{}\"",
                         self.buffer
                     );
                 } else {
-                    log::info!("[STATE] ScanningPrefix -> Idle (mismatch) | resetting");
+                    log::debug!("[STATE] ScanningPrefix -> Idle (mismatch) | resetting");
                     self.reset();
-                    // Re-process char as start of new trigger?
-                    // For simplicity, just reset. User can retype.
                 }
                 None
             }
             DetectorState::CollectingSite(_mode, _) => {
                 if is_valid_site_char(ch) {
                     self.buffer.push(ch);
-                    log::info!("[COLLECT] buffer: \"{}\"", self.buffer);
+                    log::debug!("[COLLECT] buffer: \"{}\"", self.buffer);
                 } else {
-                    log::info!(
+                    log::debug!(
                         "[STATE] CollectingSite -> Idle (invalid char: '{}') | resetting",
                         ch
                     );
@@ -195,7 +188,7 @@ impl TriggerDetector {
                 });
             }
         }
-        log::info!(
+        log::debug!(
             "[TERMINATOR] No trigger (state: {:?}, buffer: \"{}\")",
             self.state,
             self.buffer
@@ -224,8 +217,6 @@ impl TriggerDetector {
                 if self.buffer.len() < prefix_len {
                     // We backspaced into the prefix.
                     // For simplicity, just reset to avoid complex state transitions backwards.
-                    // Or we could check if it matches a prefix prefix.
-                    // Let's reset to be safe and simple.
                     self.reset();
                 }
             } else if self.state == DetectorState::ScanningPrefix && !self.check_prefixes() {
@@ -318,6 +309,7 @@ mod tests {
         assert_eq!(t.mode, GenerationMode::Concatenation);
     }
 }
+
 fn is_valid_site_char(ch: char) -> bool {
     ch.is_ascii_alphanumeric() || ch == '.' || ch == '-' || ch == '_' || ch == '!' || ch == '@'
 }
@@ -379,44 +371,10 @@ fn is_terminator(key: Key) -> bool {
     matches!(key, Key::Space | Key::Return | Key::Tab)
 }
 
-#[cfg(target_os = "macos")]
 pub fn start_keyboard_listener(
     tx: Sender<TriggerEvent>,
     triggers: Vec<(String, GenerationMode)>,
     injection_active: Arc<AtomicBool>,
 ) -> Result<std::thread::JoinHandle<()>> {
-    detect_macos::start_keyboard_listener_macos(tx, triggers, injection_active)
-}
-
-#[cfg(not(target_os = "macos"))]
-pub fn start_keyboard_listener(
-    tx: Sender<TriggerEvent>,
-    triggers: Vec<(String, GenerationMode)>,
-    injection_active: Arc<AtomicBool>,
-) -> Result<thread::JoinHandle<()>> {
-    let handle = thread::spawn(move || {
-        let mut detector = TriggerDetector::new(triggers.clone(), injection_active);
-
-        log::info!(
-            "[LISTENER] Keyboard listener started, triggers: {:?}",
-            triggers
-        );
-
-        let callback = move |event: Event| {
-            if let Some(trigger) = detector.process_event(&event) {
-                log::info!("[SEND] Sending trigger event: {:?}", trigger);
-                if let Err(e) = tx.send(trigger) {
-                    log::error!("[ERROR] Failed to send trigger: {}", e);
-                }
-            }
-        };
-
-        log::info!("[LISTENER] Starting rdev::listen...");
-        if let Err(e) = listen(callback) {
-            log::error!("[ERROR] Keyboard listener error: {:?}", e);
-        }
-        log::info!("[LISTENER] rdev::listen exited");
-    });
-
-    Ok(handle)
+    platform::start_keyboard_listener(tx, triggers, injection_active)
 }

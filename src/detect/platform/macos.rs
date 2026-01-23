@@ -4,6 +4,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
 
+use std::os::raw::c_ulong;
+
+use core_foundation::base::TCFType;
+use core_foundation::mach_port::CFMachPortRef;
 use core_foundation::runloop::{kCFRunLoopCommonModes, CFRunLoop};
 use core_graphics::event::{
     CGEvent, CGEventFlags, CGEventTap, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement,
@@ -13,7 +17,46 @@ use core_graphics::event::{
 use crate::core::GenerationMode;
 use crate::error::Result;
 
-use super::{TriggerDetector, TriggerEvent};
+use super::super::{TriggerDetector, TriggerEvent};
+
+#[link(name = "CoreGraphics", kind = "framework")]
+extern "C" {
+    fn CGEventKeyboardGetUnicodeString(
+        event: Option<&CGEvent>,
+        max_string_length: c_ulong,
+        actual_string_length: *mut c_ulong,
+        unicode_string: *mut u16,
+    );
+
+    fn CGEventTapEnable(tap: CFMachPortRef, enable: bool);
+}
+
+fn event_unicode_name(event: &CGEvent) -> Option<String> {
+    let mut buf = [0u16; 8];
+    let mut actual: c_ulong = 0;
+
+    unsafe {
+        CGEventKeyboardGetUnicodeString(
+            Some(event),
+            buf.len() as c_ulong,
+            &mut actual,
+            buf.as_mut_ptr(),
+        );
+    }
+
+    if actual == 0 {
+        return None;
+    }
+
+    let actual = actual as usize;
+    if actual > buf.len() {
+        return None;
+    }
+
+    String::from_utf16(&buf[..actual])
+        .ok()
+        .filter(|s| !s.is_empty())
+}
 
 fn keycode_to_key(keycode: u16) -> Option<rdev::Key> {
     match keycode {
@@ -72,7 +115,7 @@ fn keycode_to_key(keycode: u16) -> Option<rdev::Key> {
     }
 }
 
-pub fn start_keyboard_listener_macos(
+pub fn start_keyboard_listener(
     tx: Sender<TriggerEvent>,
     triggers: Vec<(String, GenerationMode)>,
     injection_active: Arc<AtomicBool>,
@@ -91,13 +134,43 @@ pub fn start_keyboard_listener_macos(
         let tx_clone = tx.clone();
         let injection_clone = injection_active.clone();
 
+        let tap_port: Arc<std::sync::atomic::AtomicPtr<std::ffi::c_void>> =
+            Arc::new(std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()));
+        let tap_port_for_cb = tap_port.clone();
+
         let tap = CGEventTap::new(
             CGEventTapLocation::Session,
             CGEventTapPlacement::HeadInsertEventTap,
             CGEventTapOptions::ListenOnly,
             vec![CGEventType::KeyDown],
-            move |_proxy, _event_type, event: &CGEvent| {
+            move |_proxy, event_type, event: &CGEvent| {
+                if matches!(
+                    event_type,
+                    CGEventType::TapDisabledByTimeout | CGEventType::TapDisabledByUserInput
+                ) {
+                    let port = tap_port_for_cb.load(Ordering::SeqCst) as CFMachPortRef;
+                    if !port.is_null() {
+                        unsafe { CGEventTapEnable(port, true) };
+                        log::warn!(
+                            "[LISTENER-MACOS] CGEventTap disabled ({:?}); re-enabled",
+                            event_type
+                        );
+                    } else {
+                        log::warn!(
+                            "[LISTENER-MACOS] CGEventTap disabled ({:?}); no port to re-enable",
+                            event_type
+                        );
+                    }
+                    return None;
+                }
+
                 if injection_clone.load(Ordering::SeqCst) {
+                    return None;
+                }
+
+                let is_autorepeat =
+                    event.get_integer_value_field(EventField::KEYBOARD_EVENT_AUTOREPEAT) != 0;
+                if is_autorepeat {
                     return None;
                 }
 
@@ -113,11 +186,13 @@ pub fn start_keyboard_listener_macos(
                 }
 
                 if let Some(key) = keycode_to_key(keycode) {
-                    log::info!("[MACOS-KEY] keycode={} -> {:?}", keycode, key);
+                    log::debug!("[MACOS-KEY] keycode={} -> {:?}", keycode, key);
+
+                    let name = event_unicode_name(event);
 
                     let rdev_event = rdev::Event {
                         time: std::time::SystemTime::now(),
-                        name: None,
+                        name,
                         event_type: rdev::EventType::KeyPress(key),
                     };
 
@@ -135,10 +210,18 @@ pub fn start_keyboard_listener_macos(
 
         match tap {
             Ok(tap) => unsafe {
-                let loop_source = tap
-                    .mach_port
-                    .create_runloop_source(0)
-                    .expect("failed to create runloop source");
+                tap_port.store(
+                    tap.mach_port.as_concrete_TypeRef() as *mut _,
+                    Ordering::SeqCst,
+                );
+
+                let loop_source = match tap.mach_port.create_runloop_source(0) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        log::error!("[ERROR-MACOS] failed to create runloop source: {:?}", e);
+                        return;
+                    }
+                };
                 let run_loop = CFRunLoop::get_current();
                 run_loop.add_source(&loop_source, kCFRunLoopCommonModes);
                 tap.enable();
