@@ -7,13 +7,17 @@ use std::time::Duration;
 use crate::error::{EasyPasswordError, Result};
 
 #[cfg(target_os = "macos")]
-const KEYSTROKE_DELAY_MS: u64 = 20;
+const KEYSTROKE_DELAY_MS: u64 = 10;
 
 #[cfg(target_os = "windows")]
-const KEYSTROKE_DELAY_MS: u64 = 5;
+const KEYSTROKE_DELAY_MS: u64 = 2;
 
 #[cfg(target_os = "linux")]
-const KEYSTROKE_DELAY_MS: u64 = 10;
+const KEYSTROKE_DELAY_MS: u64 = 5;
+
+// A small guard delay around injection to reduce self-triggering and to give
+// the target application a moment to process backspaces before typing.
+const INJECTION_GUARD_DELAY_MS: u64 = 20;
 
 pub struct TextInjector {
     enigo: Enigo,
@@ -33,11 +37,11 @@ impl TextInjector {
 
     pub fn replace_trigger(&mut self, backspace_count: usize, replacement: &str) -> Result<()> {
         self.injection_active.store(true, Ordering::SeqCst);
-        thread::sleep(Duration::from_millis(50));
+        thread::sleep(Duration::from_millis(INJECTION_GUARD_DELAY_MS));
 
         let result = self.do_replacement(backspace_count, replacement);
 
-        thread::sleep(Duration::from_millis(50));
+        thread::sleep(Duration::from_millis(INJECTION_GUARD_DELAY_MS));
         self.injection_active.store(false, Ordering::SeqCst);
 
         result
@@ -51,7 +55,7 @@ impl TextInjector {
             thread::sleep(Duration::from_millis(KEYSTROKE_DELAY_MS));
         }
 
-        thread::sleep(Duration::from_millis(50));
+        thread::sleep(Duration::from_millis(INJECTION_GUARD_DELAY_MS));
 
         self.enigo
             .text(replacement)
@@ -62,7 +66,7 @@ impl TextInjector {
 
     pub fn clear_text(&mut self, char_count: usize) -> Result<()> {
         self.injection_active.store(true, Ordering::SeqCst);
-        thread::sleep(Duration::from_millis(50));
+        thread::sleep(Duration::from_millis(INJECTION_GUARD_DELAY_MS));
 
         for _ in 0..char_count {
             self.enigo
@@ -71,7 +75,7 @@ impl TextInjector {
             thread::sleep(Duration::from_millis(KEYSTROKE_DELAY_MS));
         }
 
-        thread::sleep(Duration::from_millis(50));
+        thread::sleep(Duration::from_millis(INJECTION_GUARD_DELAY_MS));
         self.injection_active.store(false, Ordering::SeqCst);
 
         Ok(())

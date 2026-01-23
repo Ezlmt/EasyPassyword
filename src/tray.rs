@@ -131,6 +131,109 @@ pub fn run_tray(
 }
 
 fn default_icon() -> tray_icon::Icon {
-    const RGBA: &[u8] = include_bytes!("../assets/icon-tray-32.rgba");
-    tray_icon::Icon::from_rgba(RGBA.to_vec(), 32, 32).expect("invalid tray icon")
+    tray_icon::Icon::from_rgba(generate_tray_icon_rgba_32(), 32, 32).expect("invalid tray icon")
+}
+
+fn generate_tray_icon_rgba_32() -> Vec<u8> {
+    const W: usize = 32;
+    const H: usize = 32;
+
+    // Background + bars palette.
+    let bg = [0x15u8, 0x15u8, 0x15u8]; // #151515
+    let bar = [0x00u8, 0xE6u8, 0x76u8]; // #00E676
+
+    // Signed distance to a rounded rectangle centered at (cx, cy).
+    fn sd_round_rect(px: f32, py: f32, cx: f32, cy: f32, hw: f32, hh: f32, r: f32) -> f32 {
+        let dx = (px - cx).abs() - hw;
+        let dy = (py - cy).abs() - hh;
+        let ax = dx.max(0.0);
+        let ay = dy.max(0.0);
+        let outside = (ax * ax + ay * ay).sqrt();
+        let inside = dx.max(dy).min(0.0);
+        outside + inside - r
+    }
+
+    fn smooth_alpha(d: f32) -> f32 {
+        // ~1px soft edge.
+        let a = 0.5 - d;
+        a.clamp(0.0, 1.0)
+    }
+
+    let mut out = vec![0u8; W * H * 4];
+
+    // Layout in pixel space.
+    let cx = 16.0;
+    let cy = 16.0;
+
+    // Outer squircle.
+    let outer_hw = 10.0;
+    let outer_hh = 10.0;
+    let outer_r = 7.0;
+
+    // Two vertical pills hinting at ';;'.
+    let pill_w = 3.0;
+    let pill_h = 7.0;
+    let pill_r = 3.0;
+    let left_x = 12.0;
+    let right_x = 20.0;
+
+    for y in 0..H {
+        for x in 0..W {
+            // 2x2 supersampling for crisper edges.
+            let mut a_outer = 0.0;
+            let mut a_left = 0.0;
+            let mut a_right = 0.0;
+            for sy in 0..2 {
+                for sx in 0..2 {
+                    let px = x as f32 + (sx as f32 + 0.5) * 0.5;
+                    let py = y as f32 + (sy as f32 + 0.5) * 0.5;
+
+                    let d_outer = sd_round_rect(px, py, cx, cy, outer_hw, outer_hh, outer_r);
+                    a_outer += smooth_alpha(d_outer);
+
+                    let d_left = sd_round_rect(px, py, left_x, cy, pill_w, pill_h, pill_r);
+                    a_left += smooth_alpha(d_left);
+
+                    let d_right = sd_round_rect(px, py, right_x, cy, pill_w, pill_h, pill_r);
+                    a_right += smooth_alpha(d_right);
+                }
+            }
+            a_outer *= 0.25;
+            a_left *= 0.25;
+            a_right *= 0.25;
+
+            // Bars only render inside the outer shape.
+            let a_bar = (a_left.max(a_right)).min(a_outer);
+
+            // Composite: outer bg + bars over it.
+            let mut r = 0.0;
+            let mut g = 0.0;
+            let mut b = 0.0;
+            if a_outer > 0.0 {
+                r = bg[0] as f32 / 255.0;
+                g = bg[1] as f32 / 255.0;
+                b = bg[2] as f32 / 255.0;
+            }
+
+            if a_bar > 0.0 {
+                let br = bar[0] as f32 / 255.0;
+                let bgc = bar[1] as f32 / 255.0;
+                let bb = bar[2] as f32 / 255.0;
+                // Over operator with a_bar over a_outer.
+                r = r * (1.0 - a_bar) + br * a_bar;
+                g = g * (1.0 - a_bar) + bgc * a_bar;
+                b = b * (1.0 - a_bar) + bb * a_bar;
+            }
+
+            let a = a_outer.max(a_bar);
+
+            let i = (y * W + x) * 4;
+            out[i] = (r * 255.0).round() as u8;
+            out[i + 1] = (g * 255.0).round() as u8;
+            out[i + 2] = (b * 255.0).round() as u8;
+            out[i + 3] = (a * 255.0).round() as u8;
+        }
+    }
+
+    out
 }
